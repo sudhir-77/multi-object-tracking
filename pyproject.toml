@@ -1,0 +1,17 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "pybind11>=2.13"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "tracker-cpp"
+version = "1.0.0"
+description = "C++17 Kalman filter and Hungarian assignment core"
+requires-python = ">=3.11"
+
+[tool.scikit-build]
+minimum-version = "0.10"
+build.verbose = false
+wheel.packages = []
+
+[tool.scikit-build.cmake]
+version = ">=3.15"
