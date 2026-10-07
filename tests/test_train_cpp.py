@@ -11,15 +11,17 @@ from tracker.train import train_association
 def test_training_on_a_tiny_sequence_returns_a_model():
     dets = []
     gt = []
-    for frame in range(1, 9):
+    for frame in range(1, 13):
+        if 5 <= frame <= 7:
+            continue
         x = 10.0 + frame * 3.0
         dets.append([frame, x, 20.0, 18.0, 40.0, 0.95])
-        dets.append([frame, 500.0, 20.0, 18.0, 40.0, 0.4])
+        dets.append([frame, x + 30.0, 20.0, 18.0, 40.0, 0.4])
         gt.append([frame, 1, x, 20.0, 18.0, 40.0, 1, 1])
-        gt.append([frame, 2, 500.0, 20.0, 18.0, 40.0, 1, 1])
+        gt.append([frame, 2, x + 30.0, 20.0, 18.0, 40.0, 1, 1])
     sequence = {
         "name": "toy",
-        "seq_length": 8,
+        "seq_length": 12,
         "dets": np.asarray(dets, dtype=np.float64),
         "gt": np.asarray(gt, dtype=np.float64),
     }

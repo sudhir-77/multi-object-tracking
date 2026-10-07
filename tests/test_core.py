@@ -115,7 +115,7 @@ def test_sort_breaks_identity_across_a_long_gap_and_learned_keeps_it():
         Close(),
         np.zeros(10),
         np.ones(10),
-        threshold=0.2,
+        threshold=1.0,
         max_age=30,
         min_hits=1,
     )

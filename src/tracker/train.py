@@ -2,130 +2,86 @@
 
 from __future__ import annotations
 
+from collections import Counter, defaultdict
+
 import numpy as np
 import torch
 from torch import nn
 
-from tracker.constants import FEATURE_NAMES, LEARNED_MAX_AGE, PEDESTRIAN_CLASS, SEED
-from tracker.features import apply_normalizer, feature_matrix, fit_normalizer, pair_features
-from tracker.geometry import box_iou, center, xywh_to_xyxy
-from tracker.hungarian import hungarian
-from tracker.kalman import KalmanBox
+from tracker.constants import FEATURE_NAMES, SEED
+from tracker.features import apply_normalizer, feature_matrix, fit_normalizer
+from tracker.geometry import box_iou
+from tracker.metrics import prepare_sequence
 from tracker.model import AssociationNet
+from tracker.relink import junction_features, motion_gate, tracklets_from_rows
+from tracker.sort import track_sort_array
 
 
-class _SimTrack:
-    def __init__(self, xyxy: list[float]) -> None:
-        self.kf = KalmanBox(xyxy)
-        self.last_xyxy = [float(v) for v in xyxy]
-        self.time_since_update = 0
-        cx, cy = center(xyxy)
-        self.prev_center = (cx, cy)
-        self.obs_vel = [0.0, 0.0]
-
-    def predict(self) -> None:
-        self.kf.predict()
-        self.time_since_update += 1
-
-    def update(self, xyxy: list[float]) -> None:
-        gap = self.time_since_update if self.time_since_update > 0 else 1
-        cx, cy = center(xyxy)
-        self.obs_vel = [(cx - self.prev_center[0]) / gap, (cy - self.prev_center[1]) / gap]
-        self.prev_center = (cx, cy)
-        self.last_xyxy = [float(v) for v in xyxy]
-        self.time_since_update = 0
-        self.kf.update(xyxy)
-
-
-def _match_dets_to_gt(
-    det_xyxy: list[list[float]], gt_xyxy: list[list[float]], gt_ids: list[int]
-) -> dict[int, int]:
-    """Map gt id -> detection index for pairs with IoU >= 0.5."""
-    if not det_xyxy or not gt_xyxy:
-        return {}
-    cost = np.zeros((len(gt_xyxy), len(det_xyxy)), dtype=np.float64)
-    for i, gt_box in enumerate(gt_xyxy):
-        for j, det_box in enumerate(det_xyxy):
-            iou = box_iou(gt_box, det_box)
-            cost[i, j] = 1.0 - iou if iou >= 0.5 else 1.0e6
-    assigned: dict[int, int] = {}
-    for i, j in hungarian(cost):
-        if cost[i, j] >= 1.0e5:
+def _majority_identity(frames: list[dict[str, np.ndarray]]) -> dict[int, int | None]:
+    """Map a SORT id to the pedestrian it overlaps most often. Ambiguous ids are dropped."""
+    votes: dict[int, Counter[int]] = defaultdict(Counter)
+    lengths: Counter[int] = Counter()
+    for frame in frames:
+        taken: set[int] = set()
+        for j, pid in enumerate(frame["pr_ids"]):
+            best_iou = 0.5
+            best_gid = None
+            for i, gid in enumerate(frame["gt_ids"]):
+                gid_i = int(gid)
+                if gid_i in taken:
+                    continue
+                iou = box_iou(frame["pr_xyxy"][j], frame["gt_xyxy"][i])
+                if iou >= best_iou:
+                    best_iou = iou
+                    best_gid = gid_i
+            lengths[int(pid)] += 1
+            if best_gid is not None:
+                taken.add(best_gid)
+                votes[int(pid)][best_gid] += 1
+    assigned: dict[int, int | None] = {}
+    for pid, length in lengths.items():
+        if not votes[pid]:
+            assigned[pid] = None
             continue
-        assigned[gt_ids[i]] = j
+        gid, count = votes[pid].most_common(1)[0]
+        unanimous = count == length and count >= 2
+        established = count >= 3 and count >= 0.5 * length
+        if unanimous or established:
+            assigned[pid] = int(gid)
+        else:
+            assigned[pid] = None
     return assigned
 
 
 def pairs_from_sequence(sequence: dict, rng: np.random.RandomState, negatives: int = 2) -> tuple[np.ndarray, np.ndarray]:
-    """Positive and negative pairs from pedestrian-aligned detections."""
+    """Tracklet junctions labeled by ground-truth identity. ``rng`` and ``negatives`` keep the call stable."""
+    del negatives
     seq_length = int(sequence["seq_length"])
-    dets = sequence["dets"]
-    gt = sequence["gt"]
-    det_frames: list[list[list[float]]] = [[] for _ in range(seq_length)]
-    det_conf: list[list[float]] = [[] for _ in range(seq_length)]
-    for row in dets:
-        frame = int(row[0])
-        if 1 <= frame <= seq_length:
-            det_frames[frame - 1].append(xywh_to_xyxy(row[1:5]))
-            det_conf[frame - 1].append(float(row[5]))
-    gt_frames_box: list[list[list[float]]] = [[] for _ in range(seq_length)]
-    gt_frames_id: list[list[int]] = [[] for _ in range(seq_length)]
-    for row in gt:
-        frame = int(row[0])
-        if not (1 <= frame <= seq_length):
-            continue
-        if int(row[7]) != PEDESTRIAN_CLASS or float(row[6]) == 0.0:
-            continue
-        gt_frames_box[frame - 1].append(xywh_to_xyxy(row[2:6]))
-        gt_frames_id[frame - 1].append(int(row[1]))
-
-    sims: dict[int, _SimTrack] = {}
+    dets = np.asarray(sequence["dets"], dtype=np.float64)
+    rows = track_sort_array(dets[:, :5] if dets.size else dets, seq_length)
+    if rows.size == 0:
+        return (
+            np.zeros((0, len(FEATURE_NAMES)), dtype=np.float64),
+            np.zeros((0,), dtype=np.float64),
+        )
+    identities = _majority_identity(prepare_sequence(sequence["gt"], rows, seq_length))
+    tracklets = tracklets_from_rows(rows)
     features: list[list[float]] = []
     labels: list[float] = []
-    for t in range(seq_length):
-        for sim in sims.values():
-            sim.predict()
-        assigned = _match_dets_to_gt(det_frames[t], gt_frames_box[t], gt_frames_id[t])
-        seen: set[int] = set()
-        for gt_id, det_index in assigned.items():
-            seen.add(gt_id)
-            det_box = det_frames[t][det_index]
-            conf = det_conf[t][det_index]
-            sim = sims.get(gt_id)
-            if sim is None:
-                sims[gt_id] = _SimTrack(det_box)
+    for earlier in tracklets:
+        gid = identities.get(earlier.id)
+        for later in tracklets:
+            if earlier.id == later.id:
                 continue
-            pos = pair_features(sim.kf.xyxy(), sim.last_xyxy, sim.obs_vel, sim.time_since_update, det_box, conf)
-            features.append(pos)
-            labels.append(1.0)
-            others = [k for k in range(len(det_frames[t])) if k != det_index]
-            if others:
-                last_c = center(sim.last_xyxy)
-                ranked = sorted(
-                    others,
-                    key=lambda k: (center(det_frames[t][k])[0] - last_c[0]) ** 2
-                    + (center(det_frames[t][k])[1] - last_c[1]) ** 2,
-                )
-                chosen = ranked[:1]
-                if len(ranked) > 1 and negatives > 1:
-                    rest = ranked[1:]
-                    pick = int(rng.randint(0, len(rest)))
-                    chosen.append(rest[pick])
-                for k in chosen:
-                    neg = pair_features(
-                        sim.kf.xyxy(),
-                        sim.last_xyxy,
-                        sim.obs_vel,
-                        sim.time_since_update,
-                        det_frames[t][k],
-                        det_conf[t][k],
-                    )
-                    features.append(neg)
-                    labels.append(0.0)
-            sim.update(det_box)
-        drop = [gid for gid, sim in sims.items() if gid not in seen and sim.time_since_update > LEARNED_MAX_AGE]
-        for gid in drop:
-            del sims[gid]
+            feats = junction_features(earlier, later)
+            if feats is None or not motion_gate(feats):
+                continue
+            other = identities.get(later.id)
+            if gid is None or other is None:
+                continue
+            features.append(feats)
+            labels.append(1.0 if gid == other else 0.0)
+    del rng
     if not features:
         return (
             np.zeros((0, len(FEATURE_NAMES)), dtype=np.float64),

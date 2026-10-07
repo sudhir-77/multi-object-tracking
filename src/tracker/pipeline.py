@@ -252,7 +252,7 @@ def run_pipeline(quick: bool = False, out_dir: Path | None = None, device: str =
     (out / "split.json").write_text(json.dumps(split, indent=2) + "\n", encoding="utf-8")
 
     max_frames = 25 if quick else None
-    epochs = 2 if quick else 8
+    epochs = 2 if quick else 40
     thresholds = (0.30,) if quick else MATCH_THRESHOLDS
     repeats = 1 if quick else 5
     train_names = TRAIN_SEQUENCES[:1] if quick else list(TRAIN_SEQUENCES)

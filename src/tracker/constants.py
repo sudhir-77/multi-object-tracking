@@ -34,7 +34,9 @@ SORT_IOU_THRESHOLD = 0.3
 # not selected on the held-out sequences. The match threshold is selected on val.
 LEARNED_MAX_AGE = 30
 LEARNED_MIN_HITS = 3
-MATCH_THRESHOLDS = (0.15, 0.30, 0.45, 0.60, 0.75)
+# Maximum center-distance, in units of the last box height, for a tracklet merge.
+# The value used at test time is chosen on the validation sequence.
+MATCH_THRESHOLDS = (0.40, 0.60, 0.80, 1.00)
 
 # MOT17 distractors removed from the score, matching TrackEval's MOT17 config.
 DISTRACTOR_CLASSES = frozenset({2, 7, 8, 12})
