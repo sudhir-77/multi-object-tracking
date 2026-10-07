@@ -124,14 +124,8 @@ def success_criteria(payload: dict) -> list[dict]:
 def render_resume(payload: dict) -> str:
     numbers = payload["reported"]
     summary = (
-        "This project tracks pedestrians from MOT17 public detections. "
-        "A constant-velocity Kalman filter and Hungarian assignment form the SORT baseline, "
-        "and a small PyTorch model scores track-detection pairs using motion and box geometry."
-    )
-    # Two sentences, as required.
-    summary = (
         "This project tracks pedestrians on MOT17 public detections with a constant-velocity Kalman filter. "
-        "A PyTorch model scores track-detection pairs from motion and box geometry, and a C++ port of the SORT core checks the same track output."
+        "A PyTorch model scores broken SORT tracklets from motion and box geometry, and a C++ port of the SORT core checks the same track output."
     )
     bullets = [
         (
